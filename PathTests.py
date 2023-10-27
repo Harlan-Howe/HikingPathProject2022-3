@@ -7,7 +7,7 @@ from PathMakerFile import PathMaker, CostModeType
 
 class MyTestCase(unittest.TestCase):
 
-    @unittest.skip("Activate this when you have written perform_search().")
+    # @unittest.skip("Activate this when you have written perform_search().")
     def test_1_display_path(self):
         pm = PathMaker(filename="40x40Gray.jpg")
         best_g_array = \
@@ -269,7 +269,7 @@ class MyTestCase(unittest.TestCase):
 
         self.assertEqual(True, True)  # add assertion here
 
-    @unittest.skip("Activate this when you have written perform_search().")
+    # @unittest.skip("Activate this when you have written perform_search().")
     def test_2_find_straight_path(self):
         pm = PathMaker(filename="Small_picture.jpg")
         PathMakerFile.COST_MODE = CostModeType.HIGH_EXPENSIVE
@@ -294,7 +294,7 @@ class MyTestCase(unittest.TestCase):
         cv2.waitKey(0)
         cv2.destroyAllWindows()
 
-    @unittest.skip("Activate this when you have written perform_search().")
+    # @unittest.skip("Activate this when you have written perform_search().")
     def test_3_find_river_path(self):
         pm = PathMaker(filename="Small_picture.jpg")
         PathMakerFile.COST_MODE = CostModeType.HIGH_EXPENSIVE

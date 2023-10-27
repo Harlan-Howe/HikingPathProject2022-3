@@ -85,6 +85,340 @@ class PathMaker:
 
         self.show_map()
 
+    def get_height_at_rc(self, point: Tuple[int, int]) -> float:
+        """
+
+        Note: I've written this convenience method to illustrate the conversion
+        from 0-255 to 0.0 to 1.0.
+        :param point: a location in (r,c) format.
+        :return: a value from 0.0 - 1.0 representing the brightness (height) at
+        this point.
+        """
+        return self.original_map[point[0]][point[1]] / 255.0
+
+    def get_neighbors_of(self, pt: Tuple[int, int]) -> List[Tuple[Tuple[int, int], float]]:
+        """
+        :param pt: an in-bounds point as (r,c)
+        :return: a list of in-bounds points to investigate along with a weight corresponding
+        to the distance from pt to this point.
+        """
+        neighbors: List[Tuple[Tuple[int, int], float]] = []
+        for row_offset in range(-1, 2):
+            for col_offset in range(-1, 2):
+                if row_offset == 0 and col_offset == 0:
+                    continue  # we don't want to include the original point.
+
+                if pt[0] + row_offset < 0 or pt[0] + row_offset >= self.original_map.shape[0] or \
+                        pt[1] + col_offset < 0 or pt[1] + col_offset >= self.original_map.shape[1]:
+                    continue  # don't include points that are out of bounds.
+
+                # if i or j is zero, then this is a N,S,E,W path, and should have weight 1.
+                if row_offset * col_offset == 0:
+                    neighbors.append(((pt[0] + row_offset, pt[1] + col_offset), 1.0))
+
+                # .... otherwise, this is a diagonal move, and we want weight √2.
+                else:
+                    neighbors.append(((pt[0] + row_offset, pt[1] + col_offset), 1.414))
+        return neighbors
+
+    def cost(self, point1: Tuple[int, int], point2: Tuple[int, int], dist: float = 1.0) -> float:
+        """
+        gives a numerical value that indicates the cost of the single step from point1 to point2, based on both lateral
+        and altitude information.
+        :param point1: the (r,c) location of a pixel on the map
+        :param point2: the (r,c)location of an adjacent pixel on the map
+        :param dist: the distance between the two pixels, probably 1.00 or 1.41.
+        :return: the cost function - how expensive is it to move from pixel1 to pixel2? This must be a POSITIVE number.
+        """
+        result: float = 0.0
+
+        h1: float = self.original_map[point1[0], point1[1]] / 256.0
+        h2: float = self.original_map[point2[0], point2[1]] / 256.0
+        if COST_MODE == CostModeType.CHANGE_EXPENSIVE:
+            result = dist + ALPHA * abs(h2 - h1)
+
+        elif COST_MODE == CostModeType.LOW_EXPENSIVE:
+            result = dist + ALPHA * (256 - h2)  # low elevations are expensive
+
+        elif COST_MODE == CostModeType.HIGH_EXPENSIVE:
+            result = dist + ALPHA * h2  # high elevations are expensive
+
+        elif COST_MODE == CostModeType.UPHILL_EXPENSIVE:
+            # elevation changes are expensive, uphill twice as much as downhill.
+            if h2 > h1:
+                result = dist + ALPHA * (h2 - h1)
+            else:
+                result = dist + ALPHA * ((h1 - h2) / 2)
+
+        elif COST_MODE == CostModeType.CHANGE_AND_HIGH_EXPENSIVE:
+            result = dist + ALPHA * (abs(h2 - h1) + h2)  # elevation changes and high elevations are expensive.
+
+        elif COST_MODE == CostModeType.STEEP_UPHILL_INCLINES_VERY_EXPENSIVE:
+            if h2 > h1:
+                result = dist + ALPHA * 256 * (h2 - h1) ** 2
+            else:
+                result = dist
+
+        assert (result > 0, "The cost function must always produce positive numbers.")
+        assert (result >= dist, "The cost function must be at least as big as the horizontal displacement to the "
+                                "finish.")
+        return result
+
+    def heuristic(self, point: Tuple[int, int]) -> float:
+        """
+        gives a numerical value that is NO MORE than the least possible cost of the path from this point to
+             self.end_point.
+        :param point: a location in (r,c) coordinates
+        :return: a consistent numerical value that is less than or equal to the least possible cost of the path from
+                    this point to the end point.
+        """
+        result = 0
+        # ------------------------------------------
+        # TODO #3: You should write this method
+        #  I recommend using the euclidean or manhattan distance from point to self.end_point_r_c.
+
+        result = (abs(point[0]-self.end_point_r_c[0])+abs(point[1]-self.end_point_r_c[1])) * 0.707
+
+        # ------------------------------------------
+        return result
+
+    def perform_search(self) -> Optional[Tuple[int, int]]:
+        """
+        Uses the A* algorithm to try to detect the optimal path from self.start_point to self.end_point.
+        :return: either the self.end_point, if we found a path, or None - if we didn't.
+        """
+        start: Tuple[int, int] = self.start_point_r_c
+        end: Tuple[int, int] = self.end_point_r_c
+
+        self.draw_start_point()
+        self.draw_end_point()
+
+        # I recommend that you use a list of two-element lists for frontier, where the first element is the "f" value,
+        # and the second is the point (a two-element list in its own right). If you tell frontier to .sort(), it will
+        # sort by the first element, which allows you to make this act like a Priority Queue, but one that you can
+        # search for a point. (Alternately, you can just linear search the unsorted list for the lowest f value
+        # - you'll have to decide which one is faster, but note that the internal "sort()" command may run faster than
+        # if you wrote it yourself.)
+        frontier: List[Tuple[float, Tuple[int, int]]] = []
+
+        # please use these data structures for visited and record so that they work with other parts of the
+        #    program nicely.
+        visited: Set[Tuple[int, int]] = set([])
+
+        # together, self.previous_point and self.best_g make up the "record" from the video.
+        # self.previous point is an array of the same size as the map, holding (-1,-1) values that indicate
+        #    the best path to here..
+        self.previous_point: Optional[np.ndarray] = np.ones((self.original_map.shape[0], self.original_map.shape[1], 2),
+                                                            dtype=int)
+        self.previous_point *= -1 # start all points at (-1,-1)
+
+        # self.best_g is an array the same size as the map indicating the least expense to get from the start point
+        #    to this point; the starting value is 9 x 10**9 for all points, which is very large.
+        self.best_g: Optional[np.ndarray] = np.ones((self.original_map.shape[0], self.original_map.shape[1]),
+                                                    dtype=float)
+        self.best_g *= 9E9 #start all points at 9 * 10**9.
+        count = 0
+
+        # ------------------------------------------
+        # TODO #4: You need to write the rest of this method.
+        # consider what you need to do before you loop through the search cycle.
+        # &&&&&&&&&&&&&&&&&&& HOWE CODE
+        frontier: queue.PriorityQueue[Tuple[float, Tuple[int, int]]] = queue.PriorityQueue()
+        frontier.put((self.heuristic(self.start_point_r_c), self.start_point_r_c))
+        # visited: List[Tuple[int, int]] = []
+        result: List[Tuple[int, int]] = None
+        self.best_g[self.start_point_r_c[0], self.start_point_r_c[1]] = 0
+        while not frontier.empty():
+
+            f, pt = frontier.get()
+
+            if pt == self.end_point_r_c:
+                return pt
+
+            # if pt in visited:
+            #     continue
+
+            neighbors = self.get_neighbors_of(pt)
+            for pt2, d in neighbors:
+                # if pt2 in visited:
+                #     continue
+                cost = self.cost(pt, pt2, d)
+                g2 = self.best_g[pt[0], pt[1]] + cost
+                f2 = g2 + self.heuristic(pt2)
+                if g2 < self.best_g[pt2[0], pt2[1]]:
+                    self.best_g[pt2[0], pt2[1]] = g2
+                    self.previous_point[pt2[0], pt2[1]] = pt
+                    frontier.put((f2, pt2))
+
+            # visited.append(pt)
+
+
+
+        # loop while there are still elements in frontier.
+
+
+        # Suggested - if you are using the List as a priority queue, you might find this code helpful.
+        # this is the equivalent of popping from a minheap priority queue.... sorted by the first value in the list.
+        # # ---------------------
+        # frontier.sort()
+        # f, pt = frontier.pop(0)
+        # # ---------------------
+
+        # # optional... every few (1000?) loops, draw the path that leads to pt and update a "heat map" that shows what
+        # #  self.best_g looks like. You might find this interesting to observe what is going on as the computer works.
+            count += 1
+            if count % 1000 == 0:
+                self.display_path(pt,(random.randint(64,255),random.randint(64,255),random.randint(64,255)))
+                self.show_map()
+                self.draw_heat_map()
+                self.draw_elevation_graph(pt) #maybe...
+                cv2.waitKey(1)
+
+        # ------------------------------------------
+        print(f"{count=}")
+
+        return result
+
+    #  =============================================================================== DRAWING METHODS
+    def set_color_at_rc(self, color: Tuple[int, int, int], point: Tuple[int, int]):
+        """
+        changes the color of drawing_map at the given (r,c) point to the color
+        (b,g,r) in range 0-255.
+        Note: you will still need to imshow the display map for this change to be
+        seen by the user.
+        :param color: a 0-255 color in format (b, g, r)
+        :param point:  a point in format (r,c)
+        :return: None
+        """
+        self.drawing_map[point[0]][point[1]] = color
+
+    def draw_start_point(self):
+        """
+        draws a marker on the self.drawing_map at location self.start_point_x_y.
+        Note that the cv2 drawing functions work in (x,y) coords, not (r,c)!
+        :return: None
+        """
+        cv2.circle(self.drawing_map, center=self.start_point_x_y, radius=10,
+                   color=(0, 192, 0), thickness=1)
+        cv2.line(self.drawing_map, (self.start_point_x_y[0] - 10, self.start_point_x_y[1]),
+                 (self.start_point_x_y[0] + 10, self.start_point_x_y[1]),
+                 color=(0, 192, 0), thickness=1)
+        cv2.line(self.drawing_map, (self.start_point_x_y[0], self.start_point_x_y[1] - 10),
+                 (self.start_point_x_y[0], self.start_point_x_y[1] + 10),
+                 color=(0, 192, 0), thickness=1)
+
+    def draw_end_point(self):
+        """
+        draws a marker on the self.drawing_map at location self.end_point_x_y.
+        Note that the cv2 drawing functions work in (x,y) coordinates, not (r,c)!
+        :return: None
+        """
+        cv2.circle(self.drawing_map, center=self.end_point_x_y, radius=10,
+                   color=(0, 0, 192), thickness=1)
+        cv2.line(self.drawing_map, (self.end_point_x_y[0] - 10, self.end_point_x_y[1]),
+                 (self.end_point_x_y[0] + 10, self.end_point_x_y[1]),
+                 color=(0, 0, 192), thickness=1)
+        cv2.line(self.drawing_map, (self.end_point_x_y[0], self.end_point_x_y[1] - 10),
+                 (self.end_point_x_y[0], self.end_point_x_y[1] + 10),
+                 color=(0, 0, 192), thickness=1)
+
+    def display_path(self, path_terminator: Tuple[int, int]=None, color: Tuple[int, int, int] = (0, 192, 255)):
+        """
+        Draws the path tracing backward from path_terminator.
+
+        Modifies the existing self.drawing_map graphics variable.
+        :param path_terminator: the last position in a sequence of positions that make the path we are drawing;
+                                or None, if no path can be found.
+        :param color: the color of the line to draw, in BGR 0-255 format.
+        :return: None
+        """
+        if path_terminator is None:
+            print("No path found.")
+            return
+        pt: Tuple[int, int] = deepcopy(path_terminator)
+        # -----------------------------------------
+        # TODO #2: You should write this method
+        #       hint: make use of self.set_color_at_rc(color, point)
+        p = path_terminator
+        while self.best_g[p[0], p[1]] != 0:
+                self.set_color_at_rc(color, p)
+                p = self.previous_point[p[0], p[1]]
+
+        # -----------------------------------------
+
+    def show_map(self):
+        """
+        causes the self.drawing_map to display/update.
+        :return:
+        """
+        cv2.imshow("Map", self.drawing_map)
+        cv2.moveWindow("Map", 0, 0)
+
+    def draw_heat_map(self):
+        """
+        An optional debugging tool that might be helpful - it draws a visual representation of self.best_g. in a window
+        called "Heat".
+        I wouldn't do this EVERY frame... it will slow the search down A LOT. But now and then it might be helpful.
+        :return: None
+        """
+
+        # A fancy, FAST trick to generate the original image if best_g is the starting value of 9E9, otherwise
+        #   full red, no blue and a green proportional to the mod of the best_g and 180.
+        # the trick works because a value like "self.best_g[:, :] < 9E9" is a boolean that
+        #   resolves to 1 if true and 0 if false. The colons correspond to an inherent loop over all the indices.
+
+        heat_map = cv2.cvtColor(self.original_map, cv2.COLOR_GRAY2BGR)
+
+        heat_map[:, :, 0] = 0 + \
+                            (self.best_g[:, :] >= 9E9) * heat_map[:, :, 0]
+        heat_map[:, :, 1] = ((self.best_g[:, :] * HEAT_MAP_SCALE) % 255) * (self.best_g[:, :] < 9E9) + \
+                            (self.best_g[:, :] >= 9E9) * heat_map[:, :, 1]
+        heat_map[:, :, 2] = 255 * (self.best_g[:, :] < 9E9) + \
+                            (self.best_g[:, :] >= 9E9) * heat_map[:, :, 2]
+
+        cv2.imshow("Heat", heat_map)
+        cv2.moveWindow("Heat", heat_map.shape[1], 0)
+
+    def draw_elevation_graph(self, path_terminator: Tuple[int, int]):
+        """
+        displays a graph of the elevation along the path that ends at the given point. A possible debugging tool,
+        or useful to see what the final path looks like, "from the side."
+        :param path_terminator: the end point of a path.
+        :return: None
+        """
+        cv2.imshow("Elevation Graph", self.generate_elevation_path_graph(path_terminator))
+        cv2.moveWindow("Elevation Graph", 0, self.drawing_map.shape[0] + 50)
+
+    def generate_elevation_path_graph(self, path_terminator: Tuple[int, int]) -> Optional[np.ndarray]:
+        """
+        generates the elevation graph used by draw_elevation_graph. Probably only used internally.
+        :param path_terminator: the end point of a path.
+        :return: an ndarray graphic of the graph to display.
+        """
+        if path_terminator is None:
+            print("No path found.")
+            return None
+        num_steps: int = 0
+        pt: Tuple[int, int] = deepcopy(path_terminator)
+        while pt[0] != -1 and pt[1] != -1:
+            num_steps += 1
+            pt = self.previous_point[pt[0], pt[1]]
+
+        result = np.zeros((256, num_steps + 1, 3), dtype=float)
+        x: int = 0
+        pt: Tuple[int, int] = deepcopy(path_terminator)
+        last_h: int = -1
+        while pt[0] != -1 and pt[1] != -1:
+            x += 1
+            h: int = self.original_map[pt[0], pt[1]]
+            if last_h > -1:
+                cv2.line(result, (num_steps - x, 255 - h), (num_steps - x + 1, 255 - last_h), (0, 255, 0), thickness=1)
+            last_h = h
+            pt = self.previous_point[pt[0], pt[1]]
+
+        return result
+
+    #  ============================================================================ MOUSE AND GAME LOOP METHODS
     def start_process(self):
         """
         this is essentially our game loop - it sets up the mouse listener,
@@ -121,29 +455,6 @@ class PathMaker:
             while self.click_mode == ClickHandlerMode.DONE:
                 cv2.waitKey(1)
 
-    def get_height_at_rc(self, point: Tuple[int, int]) -> float:
-        """
-
-        Note: I've written this convenience method to illustrate the conversion
-        from 0-255 to 0.0 to 1.0.
-        :param point: a location in (r,c) format.
-        :return: a value from 0.0 - 1.0 representing the brightness (height) at
-        this point.
-        """
-        return self.original_map[point[0]][point[1]] / 255.0
-
-    def set_color_at_rc(self, color: Tuple[int, int, int], point: Tuple[int, int]):
-        """
-        changes the color of drawing_map at the given (r,c) point to the color
-        (b,g,r) in range 0-255.
-        Note: you will still need to imshow the display map for this change to be
-        seen by the user.
-        :param color: a 0-255 color in format (b, g, r)
-        :param point:  a point in format (r,c)
-        :return: None
-        """
-        self.drawing_map[point[0]][point[1]] = color
-
     def reset(self):
         """
         restores the displayed image to the originally loaded graphic and prepares to wait for first point
@@ -152,36 +463,6 @@ class PathMaker:
         self.click_mode = ClickHandlerMode.FIRST_CLICK
         self.drawing_map = cv2.cvtColor(self.original_map, cv2.COLOR_GRAY2BGR)
         self.show_map()
-
-    def draw_start_point(self):
-        """
-        draws a marker on the self.drawing_map at location self.start_point_x_y.
-        Note that the cv2 drawing functions work in (x,y) coords, not (r,c)!
-        :return: None
-        """
-        cv2.circle(self.drawing_map, center=self.start_point_x_y, radius=10,
-                   color=(0, 192, 0), thickness=1)
-        cv2.line(self.drawing_map, (self.start_point_x_y[0] - 10, self.start_point_x_y[1]),
-                 (self.start_point_x_y[0] + 10, self.start_point_x_y[1]),
-                 color=(0, 192, 0), thickness=1)
-        cv2.line(self.drawing_map, (self.start_point_x_y[0], self.start_point_x_y[1] - 10),
-                 (self.start_point_x_y[0], self.start_point_x_y[1] + 10),
-                 color=(0, 192, 0), thickness=1)
-
-    def draw_end_point(self):
-        """
-        draws a marker on the self.drawing_map at location self.end_point_x_y.
-        Note that the cv2 drawing functions work in (x,y) coordinates, not (r,c)!
-        :return: None
-        """
-        cv2.circle(self.drawing_map, center=self.end_point_x_y, radius=10,
-                   color=(0, 0, 192), thickness=1)
-        cv2.line(self.drawing_map, (self.end_point_x_y[0] - 10, self.end_point_x_y[1]),
-                 (self.end_point_x_y[0] + 10, self.end_point_x_y[1]),
-                 color=(0, 0, 192), thickness=1)
-        cv2.line(self.drawing_map, (self.end_point_x_y[0], self.end_point_x_y[1] - 10),
-                 (self.end_point_x_y[0], self.end_point_x_y[1] + 10),
-                 color=(0, 0, 192), thickness=1)
 
     def handle_click(self, event, x, y, unused_flags, unused_param):
         """
@@ -246,285 +527,6 @@ class PathMaker:
         self.waiting_for_click = True
         while self.waiting_for_click:
             cv2.waitKey(1)
-
-    def display_path(self, path_terminator: Tuple[int, int]=None, color: Tuple[int, int, int] = (0, 192, 255)):
-        """
-        Draws the path tracing backward from path_terminator.
-
-        Modifies the existing self.drawing_map graphics variable.
-        :param path_terminator: the last position in a sequence of positions that make the path we are drawing;
-                                or None, if no path can be found.
-        :param color: the color of the line to draw, in BGR 0-255 format.
-        :return: None
-        """
-        if path_terminator is None:
-            print("No path found.")
-            return
-        pt: Tuple[int, int] = deepcopy(path_terminator)
-        # -----------------------------------------
-        # TODO #2: You should write this method
-        #       hint: make use of self.set_color_at_rc(color, point)
-        p = path_terminator
-        while self.best_g[p[0], p[1]] != 0:
-                self.set_color_at_rc(color, p)
-                p = self.previous_point[p[0], p[1]]
-
-        # -----------------------------------------
-
-    def cost(self, point1: Tuple[int, int], point2: Tuple[int, int], dist: float = 1.0) -> float:
-        """
-        gives a numerical value that indicates the cost of the single step from point1 to point2, based on both lateral
-        and altitude information.
-        :param point1: the (r,c) location of a pixel on the map
-        :param point2: the (r,c)location of an adjacent pixel on the map
-        :param dist: the distance between the two pixels, probably 1.00 or 1.41.
-        :return: the cost function - how expensive is it to move from pixel1 to pixel2? This must be a POSITIVE number.
-        """
-        result: float = 0.0
-
-        h1: float = self.original_map[point1[0], point1[1]] / 256.0
-        h2: float = self.original_map[point2[0], point2[1]] / 256.0
-        if COST_MODE == CostModeType.CHANGE_EXPENSIVE:
-            result = dist + ALPHA * abs(h2 - h1)
-
-        elif COST_MODE == CostModeType.LOW_EXPENSIVE:
-            result = dist + ALPHA * (256 - h2)  # low elevations are expensive
-
-        elif COST_MODE == CostModeType.HIGH_EXPENSIVE:
-            result = dist + ALPHA * h2  # high elevations are expensive
-
-        elif COST_MODE == CostModeType.UPHILL_EXPENSIVE:
-            # elevation changes are expensive, uphill twice as much as downhill.
-            if h2 > h1:
-                result = dist + ALPHA * (h2 - h1)
-            else:
-                result = dist + ALPHA * ((h1 - h2) / 2)
-
-        elif COST_MODE == CostModeType.CHANGE_AND_HIGH_EXPENSIVE:
-            result = dist + ALPHA * (abs(h2 - h1) + h2)  # elevation changes and high elevations are expensive.
-
-        elif COST_MODE == CostModeType.STEEP_UPHILL_INCLINES_VERY_EXPENSIVE:
-            if h2 > h1:
-                result = dist + ALPHA * 256 * (h2 - h1) ** 2
-            else:
-                result = dist
-
-        assert (result > 0, "The cost function must always produce positive numbers.")
-        assert (result >= dist, "The cost function must be at least as big as the horizontal displacement to the "
-                                "finish.")
-        return result
-
-    def heuristic(self, point: Tuple[int, int]) -> float:
-        """
-        gives a numerical value that is NO MORE than the least possible cost of the path from this point to
-             self.end_point.
-        :param point: a location in (r,c) coordinates
-        :return: a consistent numerical value that is less than or equal to the least possible cost of the path from
-                    this point to the end point.
-        """
-        result = 0
-        # ------------------------------------------
-        # TODO #3: You should write this method
-        #  I recommend using the euclidean or manhattan distance from point to self.end_point_r_c.
-
-        result = (abs(point[0]-self.end_point_r_c[0])+abs(point[1]-self.end_point_r_c[1])) * 0.707
-
-        # ------------------------------------------
-        return result
-
-    def get_neighbors(self, pt: Tuple[int, int]) -> List[Tuple[Tuple[int, int], float]]:
-        """
-        :param pt: an in-bounds point as (r,c)
-        :return: a list of in-bounds points to investigate along with a weight corresponding
-        to the distance from pt to this point.
-        """
-        neighbors: List[Tuple[Tuple[int, int], float]] = []
-        for row_offset in range(-1, 2):
-            for col_offset in range(-1, 2):
-                if row_offset == 0 and col_offset == 0:
-                    continue  # we don't want to include the original point.
-
-                if pt[0] + row_offset < 0 or pt[0] + row_offset >= self.original_map.shape[0] or \
-                        pt[1] + col_offset < 0 or pt[1] + col_offset >= self.original_map.shape[1]:
-                    continue  # don't include points that are out of bounds.
-
-                # if i or j is zero, then this is a N,S,E,W path, and should have weight 1.
-                if row_offset * col_offset == 0:
-                    neighbors.append(((pt[0] + row_offset, pt[1] + col_offset), 1.0))
-
-                # .... otherwise, this is a diagonal move, and we want weight √2.
-                else:
-                    neighbors.append(((pt[0] + row_offset, pt[1] + col_offset), 1.414))
-        return neighbors
-
-    def draw_heat_map(self):
-        """
-        An optional debugging tool that might be helpful - it draws a visual representation of self.best_g. in a window
-        called "Heat".
-        I wouldn't do this EVERY frame... it will slow the search down A LOT. But now and then it might be helpful.
-        :return: None
-        """
-
-        # A fancy, FAST trick to generate the original image if best_g is the starting value of 9E9, otherwise
-        #   full red, no blue and a green proportional to the mod of the best_g and 180.
-        # the trick works because a value like "self.best_g[:, :] < 9E9" is a boolean that
-        #   resolves to 1 if true and 0 if false. The colons correspond to an inherent loop over all the indices.
-
-        heat_map = cv2.cvtColor(self.original_map, cv2.COLOR_GRAY2BGR)
-
-        heat_map[:, :, 0] = 0 + \
-                            (self.best_g[:, :] >= 9E9) * heat_map[:, :, 0]
-        heat_map[:, :, 1] = ((self.best_g[:, :] * HEAT_MAP_SCALE) % 255) * (self.best_g[:, :] < 9E9) + \
-                            (self.best_g[:, :] >= 9E9) * heat_map[:, :, 1]
-        heat_map[:, :, 2] = 255 * (self.best_g[:, :] < 9E9) + \
-                            (self.best_g[:, :] >= 9E9) * heat_map[:, :, 2]
-
-        cv2.imshow("Heat", heat_map)
-        cv2.moveWindow("Heat", heat_map.shape[1], 0)
-
-    def show_map(self):
-        """
-        causes the self.drawing_map to display/update.
-        :return:
-        """
-        cv2.imshow("Map", self.drawing_map)
-        cv2.moveWindow("Map", 0, 0)
-
-    def draw_elevation_graph(self, path_terminator: Tuple[int, int]):
-        """
-        displays a graph of the elevation along the path that ends at the given point. A possible debugging tool,
-        or useful to see what the final path looks like, "from the side."
-        :param path_terminator: the end point of a path.
-        :return: None
-        """
-        cv2.imshow("Elevation Graph", self.generate_elevation_path_graph(path_terminator))
-        cv2.moveWindow("Elevation Graph", 0, self.drawing_map.shape[0] + 50)
-
-    def generate_elevation_path_graph(self, path_terminator: Tuple[int, int]) -> Optional[np.ndarray]:
-        """
-        generates the elevation graph used by draw_elevation_graph. Probably only used internally.
-        :param path_terminator: the end point of a path.
-        :return: an ndarray graphic of the graph to display.
-        """
-        if path_terminator is None:
-            print("No path found.")
-            return None
-        num_steps: int = 0
-        pt: Tuple[int, int] = deepcopy(path_terminator)
-        while pt[0] != -1 and pt[1] != -1:
-            num_steps += 1
-            pt = self.previous_point[pt[0], pt[1]]
-
-        result = np.zeros((256, num_steps + 1, 3), dtype=float)
-        x: int = 0
-        pt: Tuple[int, int] = deepcopy(path_terminator)
-        last_h: int = -1
-        while pt[0] != -1 and pt[1] != -1:
-            x += 1
-            h: int = self.original_map[pt[0], pt[1]]
-            if last_h > -1:
-                cv2.line(result, (num_steps - x, 255 - h), (num_steps - x + 1, 255 - last_h), (0, 255, 0), thickness=1)
-            last_h = h
-            pt = self.previous_point[pt[0], pt[1]]
-
-        return result
-
-    def perform_search(self) -> Optional[Tuple[int, int]]:
-        """
-        Uses the A* algorithm to try to detect the optimal path from self.start_point to self.end_point.
-        :return: either the self.end_point, if we found a path, or None - if we didn't.
-        """
-        start: Tuple[int, int] = self.start_point_r_c
-        end: Tuple[int, int] = self.end_point_r_c
-
-        self.draw_start_point()
-        self.draw_end_point()
-
-        # I recommend that you use a list of two-element lists for frontier, where the first element is the "f" value,
-        # and the second is the point (a two-element list in its own right). If you tell frontier to .sort(), it will
-        # sort by the first element, which allows you to make this act like a Priority Queue, but one that you can
-        # search for a point. (Alternately, you can just linear search the unsorted list for the lowest f value
-        # - you'll have to decide which one is faster, but note that the internal "sort()" command may run faster than
-        # if you wrote it yourself.)
-        frontier: List[Tuple[float, Tuple[int, int]]] = []
-
-        # please use these data structures for visited and record so that they work with other parts of the
-        #    program nicely.
-        visited: Set[Tuple[int, int]] = set([])
-
-        # together, self.previous_point and self.best_g make up the "record" from the video.
-        # self.previous point is an array of the same size as the map, holding (-1,-1) values that indicate
-        #    the best path to here..
-        self.previous_point: Optional[np.ndarray] = np.ones((self.original_map.shape[0], self.original_map.shape[1], 2),
-                                                            dtype=int)
-        self.previous_point *= -1 # start all points at (-1,-1)
-
-        # self.best_g is an array the same size as the map indicating the least expense to get from the start point
-        #    to this point; the starting value is 9 x 10**9 for all points, which is very large.
-        self.best_g: Optional[np.ndarray] = np.ones((self.original_map.shape[0], self.original_map.shape[1]),
-                                                    dtype=float)
-        self.best_g *= 9E9 #start all points at 9 * 10**9.
-        count = 0
-
-        # ------------------------------------------
-        # TODO #4: You need to write the rest of this method.
-        # consider what you need to do before you loop through the search cycle.
-        # &&&&&&&&&&&&&&&&&&& HOWE CODE
-        frontier: queue.PriorityQueue[Tuple[float, Tuple[int, int]]] = queue.PriorityQueue()
-        frontier.put((self.heuristic(self.start_point_r_c), self.start_point_r_c))
-        # visited: List[Tuple[int, int]] = []
-        result: List[Tuple[int, int]] = None
-        self.best_g[self.start_point_r_c[0], self.start_point_r_c[1]] = 0
-        while not frontier.empty():
-
-            f, pt = frontier.get()
-
-            if pt == self.end_point_r_c:
-                return pt
-
-            # if pt in visited:
-            #     continue
-
-            neighbors = self.get_neighbors(pt)
-            for pt2, d in neighbors:
-                # if pt2 in visited:
-                #     continue
-                cost = self.cost(pt, pt2, d)
-                g2 = self.best_g[pt[0], pt[1]] + cost
-                f2 = g2 + self.heuristic(pt2)
-                if g2 < self.best_g[pt2[0], pt2[1]]:
-                    self.best_g[pt2[0], pt2[1]] = g2
-                    self.previous_point[pt2[0], pt2[1]] = pt
-                    frontier.put((f2, pt2))
-
-            # visited.append(pt)
-
-
-
-        # loop while there are still elements in frontier.
-
-
-        # Suggested - if you are using the List as a priority queue, you might find this code helpful.
-        # this is the equivalent of popping from a minheap priority queue.... sorted by the first value in the list.
-        # # ---------------------
-        # frontier.sort()
-        # f, pt = frontier.pop(0)
-        # # ---------------------
-
-        # # optional... every few (1000?) loops, draw the path that leads to pt and update a "heat map" that shows what
-        # #  self.best_g looks like. You might find this interesting to observe what is going on as the computer works.
-            count += 1
-            if count % 1000 == 0:
-                self.display_path(pt,(random.randint(64,255),random.randint(64,255),random.randint(64,255)))
-                self.show_map()
-                self.draw_heat_map()
-                self.draw_elevation_graph(pt) #maybe...
-                cv2.waitKey(1)
-
-        # ------------------------------------------
-        print(f"{count=}")
-
-        return result
 
 
 # -----------------------------------------------------------------------------------------------------------------
